@@ -2,6 +2,8 @@
 
 ### Process Hollowing another process injection technique where the executable section of the legitimate process is replaced with the malicious executable.
 
+### NOTE: This was tested using visual studio NOT ~code~
+
 A. The replacement is in-memory. <br>
 B. The malicious code executes from the context of legitimate process. <br>
 C. The path of hollowed process still points to legitimate executable. 
