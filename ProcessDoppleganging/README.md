@@ -11,4 +11,6 @@ This technique consists of `four` parts:
 - Rollback
 - Animate
 
+These are documented as part of the code comments.
+
 
